@@ -1,6 +1,7 @@
 import socket
 import threading
 import random
+import time
 
 class GameServer:
     def __init__(self, host, port, rows, cols, num_treasures, num_obstacles, num_rooms):
@@ -59,6 +60,7 @@ class GameServer:
         server.bind((self.host, self.port))
         server.listen(5)
         print("Server started!")
+        threading.Thread(target=self.periodic_broadcast, daemon=True).start()
 
         while True:
             conn, addr = server.accept()
@@ -66,41 +68,48 @@ class GameServer:
             threading.Thread(target=self.handle_client, args=(conn, addr)).start()
 
     def process_player_action(self, player_id, action, conn):
-        with self.lock:
+        with self.lock:  # Proteção para a região crítica
             player = self.players[player_id]
             if action.startswith("MOVE"):
                 try:
                     _, dx, dy = action.split()
                     dx, dy = int(dx), int(dy)
                 except ValueError:
-                    conn.sendall(b"Invalid MOVE command! MOVE dx dy")
+                    conn.sendall(b"Invalid MOVE command!")
                     return
-
+                
                 x, y = player["pos"]
                 new_x, new_y = x + dx, y + dy
 
+                # Verifica se a nova posição está dentro do mapa
                 if not (0 <= new_x < len(self.map) and 0 <= new_y < len(self.map[0])):
                     conn.sendall(b"Invalid move: Out of bounds!")
                     return
 
+                # Verifica se a célula está ocupada
                 cell = self.map[new_x][new_y]
                 if cell in ("X", f"P{player_id}"):
                     conn.sendall(b"Invalid move: Obstacle or player!")
                     return
 
-                if cell == "T":
+                # Ações para diferentes tipos de célula
+                if cell == "T":  # Tesouro
                     player["treasures"] += 1
                     conn.sendall(b"Treasure collected!")
-                elif cell == "R":
+                elif cell == "R":  # Sala de tesouro
                     conn.sendall(b"Entered a treasure room!")
-                else:
+                else:  # Movimento normal
                     conn.sendall(b"Moved!")
 
+                # Atualiza o mapa e a posição do jogador
                 self.map[x][y] = None
                 self.map[new_x][new_y] = f"P{player_id}"
                 player["pos"] = (new_x, new_y)
+                
+                self.display_map()  # Exibe o mapa no servidor
 
-                self.broadcast_map()  # Envia atualização do mapa para todos
+                # Envia o mapa atualizado para o cliente
+                self.send_map_update(conn)
 
             elif action == "STATUS":
                 status = f"Position: {player['pos']}, Treasures: {player['treasures']}"
@@ -108,10 +117,27 @@ class GameServer:
 
             elif action == "QUIT":
                 conn.sendall(b"Goodbye!")
-                raise ConnectionAbortedError
+                raise ConnectionAbortedError  # Para sinalizar ao loop do cliente
 
             else:
                 conn.sendall(b"Invalid action!")
+
+    def send_map_update(self, conn):
+        map_state = "MAP_UPDATE\n" + "\n".join(" ".join(cell if cell else "." for cell in row) for row in self.map)
+        conn.sendall(map_state.encode())
+    
+    def periodic_broadcast(self, interval=5):
+        """Envia o mapa para todos os clientes a cada intervalo de tempo."""
+        while True:
+            time.sleep(interval)
+            self.broadcast_map()
+
+    def display_map(self):
+        print(f"\nMapa Principal - {time.strftime('%H:%M:%S')}:")
+        for row in self.map:
+            print(" ".join(cell if cell else "." for cell in row))
+        print()  # Linha para separar as atualizações
+
 
     def handle_client(self, conn, addr):
         print(f"Player connected from {addr}")
@@ -126,7 +152,7 @@ class GameServer:
 
         self.broadcast_map()  # Atualiza o mapa para todos
 
-        conn.sendall(b"Welcome to the game! Type commands like MOVE dx dy or STATUS.\n")
+        conn.sendall(b"Welcome to the game!\n")
         
         try:
             while True:
@@ -146,4 +172,3 @@ class GameServer:
 if __name__ == "__main__":
     server = GameServer("127.0.0.1", 65432, 10, 10, 20, 3, 2)
     server.start()
-
